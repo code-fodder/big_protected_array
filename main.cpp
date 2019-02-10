@@ -7,22 +7,31 @@
 #include <atomic>
 #include <chrono>
 
-#define ARRAY_SIZE 10
-#define MAX_INDEX (ARRAY_SIZE - 1)
+// Variables (err...ok, constants - but changes these to change the test)
+constexpr int array_size = 1000;
+constexpr int array_max_index (array_size - 1);
+constexpr int num_workers = 8;
+constexpr int work_time_ms = 2000;
+constexpr bool use_protected = false;
+constexpr int work_load_ms = 0;
+
+#define ANALYSIS_ON 1
 
 // The large array
-std::vector<long unsigned int> big_array(ARRAY_SIZE);
-//std::vector<std::atomic<int>> protected_indexes;
-std::array<std::atomic<int>, 10> protected_indexes;
+std::array<std::atomic<long unsigned int>, array_size> big_array;
+std::array<std::atomic<int>, num_workers> protected_indexes;
 std::atomic<int> worker_index;
 
 // Stops the threads
 bool running = true;
 std::atomic<long> collision_count;
+std::atomic<long> lock_count;
+std::atomic<long> amount_of_work_done;
+std::chrono::duration<double> longest_lock_time;
 
 // Random number generator
 std::mt19937 rng;
-std::uniform_int_distribution<std::mt19937::result_type> dist_1m(0, MAX_INDEX);
+std::uniform_int_distribution<std::mt19937::result_type> dist_1m(0, array_max_index);
 #define get_rand() dist_1m(rng)
 
 class array_protector
@@ -36,8 +45,17 @@ public:
 
 	void lock_index(int index)
 	{
+		#if (ANALYSIS_ON)
+			auto start = std::chrono::high_resolution_clock::now();
+		#endif
+
 		while (!try_lock_index(index))
 			;
+
+		#if (ANALYSIS_ON)
+			std::chrono::duration<double> elapsed = std::chrono::high_resolution_clock::now() - start;
+			if (longest_lock_time < elapsed) { longest_lock_time = elapsed;};
+		#endif
 	}
 
 	bool try_lock_index(int index)
@@ -48,9 +66,15 @@ public:
 		{
 			// If its not then add it - now that array value is safe from other threads
 			protected_indexes[(unsigned int) allocated_id] = index;
+	
+			#if (ANALYSIS_ON)
+ 				lock_count++;
+			#endif
 			return true;
 		}
-		collision_count++;
+		#if (ANALYSIS_ON)
+			collision_count++;
+		#endif
 		return false;
 	};
 
@@ -66,7 +90,7 @@ private:
 void print_protected_indexes()
 {
 	std::cout << "protected index list: ";
-	for (size_t i = 0; i < 10; i++)
+	for (size_t i = 0; i < num_workers; i++)
 	{
 		if (protected_indexes[i] == -1)
 			std::cout << "- ";
@@ -79,55 +103,111 @@ void print_protected_indexes()
 void print_big_array()
 {
 	std::cout << "big_array: ";
-	for (size_t i = 0; i < 10; i++)
+	for (size_t i = 0; i < 20; i++)
 	{
 		std::cout << big_array[i] << " ";
 	}
 	std::cout << std::endl;
 }
+void print_arrays(const std::string & desc)
+{
+	std::cout << "\n" << desc << std::endl;
+	print_protected_indexes();
+	print_big_array();
+	std::cout << std::endl;
+}
 
-void worker()
+void worker_protected()
 {
 	array_protector ap;
-	std::cout << "worker " << ap.allocated_id << " - started" << std::endl;
 	while (running)
 	{
 		unsigned int index = get_rand();
 		ap.lock_index((int) index);
 		big_array[index]++;
+		amount_of_work_done++;
+		std::this_thread::sleep_for(std::chrono::milliseconds(work_load_ms));
 		ap.free_index();
 	}
-	std::cout << "worker " << ap.allocated_id << " - finished" << std::endl;
 }
+
+void worker_normal()
+{
+	array_protector ap;
+	while (running)
+	{
+		unsigned int index = get_rand();
+		big_array[index]++;
+		amount_of_work_done++;
+		std::this_thread::sleep_for(std::chrono::milliseconds(work_load_ms));
+	}
+}
+
 
 int main()
 {
-	std::cout << "starting\n";
 	rng.seed(std::random_device()());
 	worker_index = -1;
 	std::fill(std::begin(protected_indexes), std::end(protected_indexes), -1);
 
-	std::cout << "last: " << big_array[MAX_INDEX] << std::endl;
-	std::cout << "RAND: " << get_rand() << std::endl;
-	std::cout << "RAND: " << get_rand() << std::endl;
-	std::cout << "RAND: " << get_rand() << std::endl;
+	print_arrays("start values");
 
-	print_protected_indexes();
-	print_big_array();
+	std::array<std::thread, num_workers> worker_threads;
+	for (auto &worker_thread : worker_threads)
+	{
+		if (use_protected)
+		{
+			worker_thread = std::thread([]{ worker_protected(); });
+		}
+		else
+		{
+			worker_thread = std::thread([]{ worker_normal(); });
+		}
+		
+	}
 
-	std::thread t1 = std::thread([]{ worker(); });
-	std::thread t2 = std::thread([]{ worker(); });
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+	// Allow workers to do their thing...
+	std::this_thread::sleep_for(std::chrono::milliseconds(work_time_ms / 2));
+	// Halfway print out
+	print_arrays("~halfway values");
+	std::this_thread::sleep_for(std::chrono::milliseconds(work_time_ms / 2));
 	running = false;
 
-	t1.join();
-	t2.join();
+	for (auto &worker_thread : worker_threads)
+	{
+		worker_thread.join();
+	}
 
-	print_protected_indexes();
-	print_big_array();
+	print_arrays("finish values");
 
-	std::cout << "collisions: " << collision_count << std::endl;
+
+	#if (ANALYSIS_ON)
+		std::cout << "\n------------------------------------------\n"
+			      << "Inputs:" << std::endl;
+		std::cout << "array size:          " << array_size << std::endl;
+		std::cout << "number of workers:   " << num_workers << std::endl;
+		std::cout << "work duration:       " << work_time_ms << "ms" << std::endl;
+		std::cout << "work load:           " << work_load_ms << "ms" << std::endl;
+		std::cout << "using protection:    " << (use_protected ? "true" : "false") << std::endl;
+		std::cout << "\nResults:" << std::endl;
+		std::cout << "Amount of work done: " << amount_of_work_done << std::endl;
+		if (use_protected)
+		{
+			std::cout << "Collisions:          " << collision_count << std::endl;
+			std::cout << "Locks:               " << lock_count << std::endl;
+			if (collision_count > 0)
+			{
+				std::cout << "Radio:               " << (lock_count / collision_count) << " locks per collision" << std::endl;
+			}
+			else
+			{
+				std::cout << "Radio:               " << "n/a (no collisions)" << std::endl;
+			}
+			std::cout << "longest lock time:   " << longest_lock_time.count() * 1000 << " ms\n";
+		}
+		std::cout << "\n" << std::endl;
+	#endif
+
 	return 0;
 }
 

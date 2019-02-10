@@ -5,7 +5,7 @@ include make_utils/common_variables.mk
 #######################################################################
 
 # Project Name
-PROJECT_NAME = callback_test
+PROJECT_NAME = big_array_tester
 
 POST_BUILD_TASKS += cd bin;
 POST_BUILD_TASKS += $(ECHO) '---------------------------------------';
