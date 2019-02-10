@@ -1,3 +1,8 @@
+## To Compile / Run:
+ - `make` - compiles
+ - `make test` - compiles and runs
+ - Edit the constexpr values at the top of main to change the test parameters
+
 ## Summary:
 When the workload is 1ms (the time taken to perform each action) then the amount of work done was:
 
